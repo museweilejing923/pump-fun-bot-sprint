@@ -54,7 +54,10 @@ const patch = (text: string, kv: Record<string, unknown>): string => {
 for (const c of combos) {
   const merged = { ...base, ...c };
   writeFileSync(stratPath, patch(readFileSync(new URL('../strategy.ts', import.meta.url).pathname, 'utf8'), merged));
-  const out = execSync(`node cli/makefun.mjs grade-local --kit ${kit} --bot ${work} --driver process --json`, { cwd: kit, encoding: 'utf8', timeout: 1_200_000 });
+  // --worktree is required: the bot dir carries a .git whose HEAD is the
+  // submitted commit, and grade-local otherwise grades HEAD and ignores
+  // the patched worktree files entirely (every combo then scores identically).
+  const out = execSync(`node cli/makefun.mjs grade-local --kit ${kit} --bot ${work} --driver process --worktree --json`, { cwd: kit, encoding: 'utf8', timeout: 1_200_000 });
   const m = JSON.parse(out).result.performance.metrics;
   const pt = m.per_token as { realized_pnl_lamports: string; mint: string }[];
   const net = Number(m.net_pnl_lamports) / 1e9;
