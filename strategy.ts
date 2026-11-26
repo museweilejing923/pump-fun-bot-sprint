@@ -42,6 +42,24 @@
 // the coin pace. They stay on (maxProbes 1) as insurance for the 6-hour
 // final window, where the main entries may land near the 20-coin bar.
 //
+// Round 3 (dev +0.0693 -> +0.1776): a replay of the dev dataset joined to the
+// grade-local per-token PnL showed the two big winners share a fingerprint
+// the 57 losers mostly lack: (a) the window's net inflow arrived almost
+// entirely in its newer half (netNew/net 0.98-0.99 vs losers' median ~0.7),
+// (b) a single whale buy of 1.48 / 3.95 SOL in the window (losers' median
+// biggest buy 1.02 SOL), and (c) real reserves 7.4 / 10.0 SOL (11 losers
+// sat under 5 SOL). So the entry now takes a whale floor (minWhaleSol) and
+// an acceleration share (accelShare: the newer half's share of net inflow),
+// both off by default and tuned on the official grade. The losers' other
+// tell is structural: 60 of 64 coins exit on exactly 2 fills (probe in,
+// stop out) — the pyramid almost never fires, because a runner spikes and
+// gives back 5% before the +35% rung's capped adds can land. Partial
+// profit-taking answers that: sell a fraction of the tokens at +30% and
+// again at +70%, banking the spike before the trailing stop fires, while
+// the rest keeps riding with the 5% trail. The partial sell resets the
+// peak tracker to the remaining position's value, so the trail is measured
+// on what is still held, not on the pre-sale size.
+//
 // Deterministic by construction: no clock, no randomness, iteration only over
 // insertion-ordered maps fed by the batch stream. Every batch, orders and
 // slot are handled in the order the harness delivers them.
@@ -71,6 +89,12 @@ export interface Params {
   nearHigh: number;
   /** Largest single sell allowed in the window (SOL); bigger smells like a dump. */
   maxSingleSell: number;
+  /** Largest single buy in the window must be at least this many SOL (a real
+   * whale buyer, not just many small buys); 0 = off. */
+  minWhaleSol: number;
+  /** Newer half of the window must carry at least this share of the window's
+   * net SOL inflow (acceleration: the move is fresh, not stale); 0 = off. */
+  accelShare: number;
   /** Curve real SOL bounds at entry. */
   minRqSol: number;
   maxRqSol: number;
@@ -82,6 +106,12 @@ export interface Params {
   creatorSellWindow: number;
   /** First buy of a position (SOL). */
   probeSol: number;
+  /** Strong-signal probe: when the window's biggest single buy is at least
+   * strongWhaleSol, the probe is strongProbeSol instead of probeSol (the
+   * two dev winners both had a whale buy of 1.48+ SOL, so size tracks the
+   * signal instead of betting the same on every coin); 0 = off. */
+  strongProbeSol: number;
+  strongWhaleSol: number;
   /** Pyramid rungs: add sol once value / cost reaches 1 + up, in order. */
   rungs: Rung[];
   /** After the last rung, add stepSol each time the price steps up at least stepAdd vs the last buy. */
@@ -93,6 +123,13 @@ export interface Params {
   minBuySol: number;
   /** Slippage on buys (bps); sells always go out at 10000. */
   buySlipBps: number;
+  /** Partial profit-taking: when value / cost reaches 1 + takeUp, sell
+   * takeFrac of the tokens; again at 1 + takeUp2 with takeFrac2 of what is
+   * left. 0 for an up disables that take. The rest keeps riding the trail. */
+  takeUp: number;
+  takeFrac: number;
+  takeUp2: number;
+  takeFrac2: number;
   /** Hard stop: exit when value falls below cost * (1 - stopLoss). */
   stopLoss: number;
   /** Trailing stop, armed once value reaches cost * (1 + trailArm). */
@@ -130,16 +167,20 @@ export const DEFAULT_PARAMS: Params = {
   minNetSol: 0.05,
   minBuys: 3,
   minBuyers: 5,
-  minPriceUp: 0.15,
+  minPriceUp: 0.22,
   maxPriceUp: 1.5,
   nearHigh: 0.88,
   maxSingleSell: 0.5,
+  minWhaleSol: 1.2,
+  accelShare: 0.8,
   minRqSol: 0.5,
   maxRqSol: 20,
   minAge: 100,
   maxAge: 350,
   creatorSellWindow: 100,
-  probeSol: 0.01,
+  probeSol: 0.02,
+  strongProbeSol: 0.1,
+  strongWhaleSol: 1.4,
   rungs: [
     { up: 0.35, sol: 0.3 },
     { up: 0.65, sol: 0.6 },
@@ -150,6 +191,10 @@ export const DEFAULT_PARAMS: Params = {
   maxPerCoin: 2.0,
   minBuySol: 0.01,
   buySlipBps: 200,
+  takeUp: 0,
+  takeFrac: 0,
+  takeUp2: 0,
+  takeFrac2: 0,
   stopLoss: 0.03,
   trail: 0.05,
   trailArm: 0.15,
@@ -203,6 +248,12 @@ interface Held {
   lastValue: number;
   /** How many pyramid rungs have been taken. */
   rungIdx: number;
+  /** How many partial profit-takes have been taken (0, 1 or 2). */
+  takeIdx: number;
+  /** Set when a partial take was just issued: re-mark the peak to the
+   * remaining position's value on the next batch, so the trailing stop is
+   * measured on what is still held. */
+  resetPeak: boolean;
 }
 
 /** Price of one token in SOL, from virtual reserves (lamports cancel out). */
@@ -250,12 +301,13 @@ export function createStrategy(p: Params = DEFAULT_PARAMS): Bot {
   };
 
   /** Entry signal on a curve's tape at slot `now`. */
-  const entrySignal = (t: Tape, now: number, rqSol: number): boolean => {
-    if (rqSol < p.minRqSol || rqSol > p.maxRqSol) return false;
-    if (t.created === null) return false;
+  /** Entry signal: the window's biggest single buy in SOL when the tape passes, else -1. */
+  const entrySignal = (t: Tape, now: number, rqSol: number): number => {
+    if (rqSol < p.minRqSol || rqSol > p.maxRqSol) return -1;
+    if (t.created === null) return -1;
     const age = now - t.created;
-    if (age < p.minAge || age > p.maxAge) return false;
-    if (now - t.creatorSellSlot < p.creatorSellWindow) return false;
+    if (age < p.minAge || age > p.maxAge) return -1;
+    if (now - t.creatorSellSlot < p.creatorSellWindow) return -1;
     const from = now - p.window;
     let buySol = 0;
     let sellSol = 0;
@@ -264,6 +316,9 @@ export function createStrategy(p: Params = DEFAULT_PARAMS): Bot {
     let high = 0;
     let last = 0;
     let biggestSell = 0;
+    let biggestBuy = 0;
+    let netNew = 0;
+    let netOld = 0;
     const buyers = new Set<string>();
     for (const tr of t.trades) {
       if (tr.slot <= from) {
@@ -275,21 +330,27 @@ export function createStrategy(p: Params = DEFAULT_PARAMS): Bot {
         buySol += tr.sol;
         buys++;
         buyers.add(tr.user);
+        if (tr.sol > biggestBuy) biggestBuy = tr.sol;
       } else {
         sellSol += tr.sol;
         if (tr.sol > biggestSell) biggestSell = tr.sol;
       }
+      if (tr.slot > now - p.window / 2) netNew += tr.buy ? tr.sol : -tr.sol;
+      else netOld += tr.buy ? tr.sol : -tr.sol;
       if (tr.price > high) high = tr.price;
       last = tr.price;
     }
-    if (buys < p.minBuys || buyers.size < p.minBuyers) return false;
-    if (buySol - sellSol < p.minNetSol) return false;
-    if (biggestSell > p.maxSingleSell) return false;
-    if (startPrice <= 0 || last <= 0) return false;
+    if (buys < p.minBuys || buyers.size < p.minBuyers) return -1;
+    if (buySol - sellSol < p.minNetSol) return -1;
+    if (biggestSell > p.maxSingleSell) return -1;
+    if (biggestBuy < p.minWhaleSol) return -1;
+    if (p.accelShare > 0 && netNew < p.accelShare * (buySol - sellSol)) return -1;
+    if (startPrice <= 0 || last <= 0) return -1;
     const up = last / startPrice - 1;
-    if (up < p.minPriceUp || up > p.maxPriceUp) return false;
-    if (last < high * p.nearHigh) return false;
-    return true;
+    if (up < p.minPriceUp || up > p.maxPriceUp) return -1;
+    if (last < high * p.nearHigh) return -1;
+    // Pass: hand the caller the whale size so the probe can be tiered.
+    return biggestBuy;
   };
 
   return {
@@ -373,9 +434,31 @@ export function createStrategy(p: Params = DEFAULT_PARAMS): Bot {
         const tokens = Number(pos.token_amount);
         const value = closeValueSol(tokens, res.vq, res.vt, tx);
         const cost = Number(pos.cost_lamports) / LAMPORTS;
+        if (h.resetPeak) {
+          h.peakValue = value;
+          h.resetPeak = false;
+        }
         if (value > h.peakValue) h.peakValue = value;
         h.lastValue = value;
         const upVsCost = cost > 0 ? value / cost - 1 : 0;
+        // Partial profit-taking: bank a fraction at the first take level,
+        // then a fraction of the rest at the second, and let the remainder
+        // ride the trailing stop. Never fires while a sell is already
+        // pending for this mint, and never on a position already exiting.
+        if (!h.exiting && h.takeIdx < 2) {
+          const takeUp = h.takeIdx === 0 ? p.takeUp : p.takeUp2;
+          const takeFrac = h.takeIdx === 0 ? p.takeFrac : p.takeFrac2;
+          if (takeUp > 0 && takeFrac > 0 && upVsCost >= takeUp && !pendingByMint.has(mint)) {
+            const sellAmt = (BigInt(Math.floor(tokens)) * BigInt(Math.round(takeFrac * 1000))) / 1000n;
+            if (sellAmt > 0n && sellAmt < tokens && orders.length < cap) {
+              orders.push({ side: 'sell', mint, token_amount: sellAmt, max_slippage_bps: 10_000 });
+              h.takeIdx++;
+              h.resetPeak = true;
+              h.invested *= 1 - takeFrac;
+              continue;
+            }
+          }
+        }
         let exit = h.exiting;
         if (!exit && value < cost * (1 - p.stopLoss)) exit = true;
         if (!exit && h.peakValue >= cost * (1 + p.trailArm) && value < h.peakValue * (1 - p.trail)) exit = true;
@@ -431,8 +514,12 @@ export function createStrategy(p: Params = DEFAULT_PARAMS): Bot {
         if (h === undefined) {
           if (slotsLeft <= 0 || mainLeft <= 0) continue;
           if (t.entries >= p.maxEntries || now - t.lastExit < p.cooldown) continue;
-          if (!entrySignal(t, now, res.rqSol)) continue;
-          want = Math.min(p.probeSol, p.maxPerCoin);
+          const whale = entrySignal(t, now, res.rqSol);
+          if (whale < 0) continue;
+          // Tier the probe on the signal: a whale-sized buy earns a bigger
+          // probe, a bare-pass signal keeps the small one.
+          const probe = p.strongProbeSol > 0 && whale >= p.strongWhaleSol ? p.strongProbeSol : p.probeSol;
+          want = Math.min(probe, p.maxPerCoin);
         } else {
           // Pyramid into strength only: the position is up on a rung, or it has
           // finished the rungs and stepped up again while flow stays positive.
@@ -472,6 +559,8 @@ export function createStrategy(p: Params = DEFAULT_PARAMS): Bot {
             lastAddPrice: price,
             lastValue: 0,
             rungIdx: 0,
+            takeIdx: 0,
+            resetPeak: false,
           });
           t.entries++;
           slotsLeft--;

@@ -10,8 +10,8 @@ A pump.fun trading bot for make.fun's "Pump.fun Bot Sprint: Make Bot And Win" bo
 
 Most new pump.fun coins die fast and a few run hard, so the bot never bets big on a first impression:
 
-- **Probe:** 0.01 SOL into a coin 100–350 slots after its CreateEvent whose last-40-slot tape shows at least 5 distinct buyers, 3 buys, positive net SOL inflow, price up ≥15% and near its window high, no single sell over 0.5 SOL, real reserves 0.5–20 SOL, and no creator sell in the last 100 slots.
-- **Pyramid:** add size only as the position proves itself — +35% → +0.30 SOL, +65% → +0.60 SOL, +100% → +0.80 SOL (max 2.00 SOL per coin), then +0.20 SOL on every further 5% step-up while flow stays positive. Buys go out at 200 bps max slippage.
+- **Probe:** 0.02 SOL into a coin 100–350 slots after its CreateEvent whose last-40-slot tape shows at least 5 distinct buyers, 3 buys, positive net SOL inflow, price up ≥22% and near its window high, no single sell over 0.5 SOL, real reserves 0.5–20 SOL, no creator sell in the last 100 slots, a single whale buy of at least 1.2 SOL, and at least 80% of the window's net inflow arriving in its newer half (acceleration). The probe is tiered on the signal: when the whale buy is at least 1.4 SOL the probe is 0.10 SOL instead of 0.02 (the two dev winners both had a 1.48+ SOL whale buy, so size tracks the signal).
+- **Pyramid:** add size only as the position proves itself — +35% → +0.30 SOL, +65% → +0.60 SOL, +100% → +0.80 SOL (max 2.00 SOL per coin), then +0.20 SOL on every further 5% step-up while flow stays positive. Buys go out at 200 bps max slippage. In practice the pyramid rarely gets past its first rung: a runner spikes and trails out within a few batches, and each buy is capped at 1% of the curve's real reserves per batch, so rung sizes above the cap change nothing (verified: bigger and earlier rungs both score identically).
 - **Exits:** −3% hard stop, 5% trailing stop armed at +15%, fade exit on −1.5 SOL net flow over 15 slots (skipped while up ≥20%), exit at once if the creator sells while we hold, 900-slot time limit unless up ≥50%.
 - **Guardrail probes:** tiny 0.01 SOL round trips keep the run above the 20-coin bar when the coin count lags the pace (fills pacing is off: it was pure fee bleed on dev). In the 6-hour final window the main entries alone may land ~16 coins, so the probes should add the ~9 round trips needed to clear the bar, at ~0.006 SOL of fee bleed.
 
@@ -30,24 +30,29 @@ Official `grade-local --driver process`, final params:
 
 | Metric | Value |
 | --- | --- |
-| Net PnL | **+0.0693 SOL** (+0.69% on 10 SOL) |
-| Win rate | 10.6% (7 of 66 round trips) |
-| Round trips / fills / coins | 66 / 134 / 64 |
-| Max drawdown | 0.32% |
-| Sharpe | 0.207 |
+| Net PnL | **+0.1776 SOL** (+1.78% on 10 SOL) |
+| Win rate | 15.6% (5 of 32 round trips) |
+| Round trips / fills / coins | 32 / 66 / 32 |
+| Max drawdown | 0.50% |
+| Sharpe | 0.255 |
 | Guardrails | compliant (≥20 coins, drawdown ≤50%) |
 | Ranked | true |
 | Determinism | two grade-local runs, identical action_log_sha256 |
+| Winners / losers | +0.2279 / −0.0503 SOL; best coin +0.1128, worst −0.0089 |
 
-Honest caveat: the dev window is now positive, so the entry clears the
-dev-profit gate — but profit is concentrated in the top 2 coins (+0.050 and
-+0.047 SOL of +0.102 gross winners; net ex-best is still +0.019 SOL, so it
-does not hinge on a single coin). The final window is fresh 6-hour data
-recorded after entries close, so the dev score is a proxy, not the result:
-if no runner shows up in those 6 hours, the bot lands near zero or slightly
-negative after probe fees. The single worst coin loses only −0.0014 SOL:
-the −3% stop plus 5% trail cap every loser, so the downside is fees and
-small probes, not blowups.
+Honest caveat: the dev window is comfortably positive, so the entry clears
+the dev-profit gate — but profit is concentrated in the top 2 coins (+0.113
+and +0.056 SOL of +0.228 gross winners; net ex-best is still +0.065 SOL, so
+it does not hinge on a single coin, though the top 3 are 94.6% of gross
+winners). The final window is fresh 6-hour data recorded after entries
+close, so the dev score is a proxy, not the result: if no runner shows up
+in those 6 hours, the bot lands near zero or slightly negative after probe
+fees. The single worst coin loses only −0.0089 SOL: the −3% stop plus 5%
+trail cap every loser, so the downside is fees and small probes, not
+blowups. Note the dev coin count fell to 32 (from 64) because the entry
+filters got stricter — in a 6-hour final window the main entries alone may
+land ~8 coins, so the guardrail probes (targetCoins 25) will have to add
+the rest to clear the 20-coin bar; that is what they are kept for.
 
 Tuning history (official grade-local each time, `tools/sweep.ts` method):
 
@@ -95,6 +100,45 @@ them off (targetFills 0) was the single biggest improvement after the age
 floor. The kit's own pilot momentum baseline scores −9.46 SOL on this same
 dev window, so probe-pyramid is far ahead of the house baseline even while
 it stays just under water.
+
+Round-3 tuning (official grade-local each time, from the +0.0693 base):
+
+| Version | Change | Net PnL |
+| --- | --- | --- |
+| R3-A | whale floor 0.5 / 1.0 / 1.4 | +0.0702 / +0.0784 / +0.0818 |
+| R3-A | accel share 0.8 / 0.9 | +0.0777 / +0.0747 |
+| R3-A | minRqSol 5 | +0.0706 |
+| R3-A | minPriceUp 0.22 | +0.0803 |
+| R3-B | partial profit-taking +30% sell 50% (and +70% again) | +0.0652 (hurts: the 5% trail banks the spike better) |
+| R3-B | partial take at +20% / +50% | +0.0632 / +0.0693 (never fires at +50%) |
+| R3-C | whale 1.0 + accel 0.8 + up 0.22 combined | **+0.0881** |
+| R3-D | probeSol 0.02 (from 0.01) | **+0.0999**; 0.03/0.04/0.05 are worse (+0.0893/+0.0728/+0.0740) |
+| R3-D | trail 0.04/0.06/0.08, stopLoss 0.02/0.04 | 0.04 flat, 0.06/0.08 worse; stop 0.02 kills a winner (+0.0407) |
+| R3-E | stepSol 0.4, stepAdd 0.02, maxAge 400, cooldown 60, maxEntries 3, maxMain 8, fadeNetSol 3, minBuys 4, minNetSol 0.1 | all identical (dead params) |
+| R3-E | minAge 150 | +0.0394 (kills the 137-slot winner — the age floor is load-bearing) |
+| R3-F/G | whale 1.4 + accel 0.8 + up 0.22 (probe 0.02) | **+0.1045**; whale 1.6 or up 0.25 kills a winner (+0.050) |
+| R3-G | bigger rungs (0.5/1.0/1.0, max 3.0) / earlier rungs (0.25/0.5/0.85) | both +0.1045 identical (1% reserve cap binds, not rung size) |
+| R3-G | step adds enabled after rung 0 | +0.0760 (hurts: top-bought size gets trailed out with the rest) |
+| R3-H | strong probe 0.03/0.04/0.06/0.08/0.10 at whale ≥1.4 | +0.1114/+0.1228/+0.1455/+0.1652/**+0.1780** |
+| R3-H | strong probe 0.12/0.15/0.20 | +0.1767/+0.1718/+0.1676 (peak at 0.10; pos plateaus — the probe itself hits the 1% reserve cap) |
+| R3-K | whale 1.0 / 1.2 / accel 0.7 on the final base | +0.1733/+0.1776/+0.1718 (flat 1.0–1.4; shipped 1.2 for margin) |
+
+Round-3 findings: the entry filters stack (whale + accel + up 0.22) by
+cutting loser bleed from −0.033 to −0.014 while keeping both winners; the
+probe is the only size lever that works, because buys are capped at 1% of
+reserves per batch — rung sizes, step adds and maxPerCoin above the cap
+change nothing, and step adds actively hurt by buying the top. The strong
+probe (0.10 SOL when the whale buy is ≥1.4 SOL) is the single biggest
+round-3 gain (+0.1045 → +0.1780) and sits on a flat plateau (0.08–0.12 all
+score +0.165 or better), so it is a region, not a point. Two sweep
+methodology traps found this round: (1) grade-local defaults to the git
+HEAD commit, not the worktree — once the bot dir carries the clone's .git,
+every sweep scored the submitted commit identically until `--worktree` was
+added to tools/sweep.ts; (2) sweep.ts cannot sweep the rungs array (its
+cartesian builder splits the array into single-rung combos that crash the
+bot with `[object Object]`) — rungs were tested by direct edits instead.
+The /tmp scratch files were wiped mid-session, so sweep bases now live in
+`scratch/` under the task dir, not /tmp.
 
 ---
 
