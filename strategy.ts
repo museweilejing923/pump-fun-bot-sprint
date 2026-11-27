@@ -60,6 +60,23 @@
 // peak tracker to the remaining position's value, so the trail is measured
 // on what is still held, not on the pre-sale size.
 //
+// Round 4 (dev +0.1776 -> +0.2163, ex-top-3 -0.040 -> +0.0007): per-token
+// instrumentation showed the shipped bot only makes 13 main entries (11
+// strong-probe + 2 weak) against ~23 guardrail probes, so the loser sum
+// (-0.0503) splits into 5 strong mains (-0.0286) and guardrail gross
+// (-0.0213). Three filters stack: a single-sell cap of 0.25 SOL and a
+// max-buyers cap of 8 cut the crowded losers; an entry-only reserve cap
+// (maxEntryRqSol 14, separate from maxRqSol — a global cap also gates the
+// pyramid adds and halves the winners, because reserves grow as a runner
+// runs); a -2% hard stop (0.01 kills the best winner, 0.015-0.025 sit on a
+// plateau); and a guardrail buy-time filter (15-slot net flow at least
+// +2 SOL) that skips coins already being dumped. What did not work:
+// shrinking the weak probe (it also sizes the guardrail probes), fewer
+// guardrail probes (they carry the one lucky spike), riding up-probes on a
+// trail (only one probe is ever up at sell time). The ex-top-3 flip is
+// thin (+0.0007) and leans on one replacement probe's luck — the total net
+// gain is the robust part, the diversification is not.
+//
 // Deterministic by construction: no clock, no randomness, iteration only over
 // insertion-ordered maps fed by the batch stream. Every batch, orders and
 // slot are handled in the order the harness delivers them.
@@ -81,6 +98,10 @@ export interface Params {
   minBuys: number;
   /** Minimum distinct buying wallets in the window. */
   minBuyers: number;
+  /** Largest distinct-buyer count allowed at entry: a tape with many small
+   * buyers is diffuse FOMO (exit liquidity forming), while the dev winners
+   * all arrived on 5-6 buyers; 0 = off. */
+  maxBuyers: number;
   /** Price now over price at the window start, minus 1. */
   minPriceUp: number;
   /** Upper bound on that rise: skip coins that already ran too far in one window. */
@@ -98,6 +119,12 @@ export interface Params {
   /** Curve real SOL bounds at entry. */
   minRqSol: number;
   maxRqSol: number;
+  /** Entry-only upper bound on real reserves (SOL): a fat curve at entry is
+   * late money; 0 = off (falls back to maxRqSol). Kept separate from
+   * maxRqSol because that also gates pyramid adds, and reserves grow as a
+   * runner runs — capping the adds by entry-time reserves kills the
+   * winners (verified: maxRqSol 14 halves the winners, +0.1776 -> +0.0844). */
+  maxEntryRqSol: number;
   /** Youngest age (slots since CreateEvent) an entry is allowed at. */
   minAge: number;
   /** Oldest age (slots) an entry is allowed at. */
@@ -106,6 +133,22 @@ export interface Params {
   creatorSellWindow: number;
   /** First buy of a position (SOL). */
   probeSol: number;
+  /** Guardrail probe size (SOL), separate from probeSol: guardrail probes
+   * are pure pace insurance that mostly bleed the fee floor, so they buy
+   * smaller than a main probe while staying at/above the 0.01 SOL round
+   * trip the coin bar counts. */
+  guardProbeSol: number;
+  /** Guardrail probes normally sell the next batch. When a probe is up at
+   * least guardRideUp at that first sell check, ride it instead: track the
+   * peak and sell on a guardRideTrail give-back or after guardRideMaxSlots
+   * slots. 0 = off (always sell at once). A probe that is flat or down
+   * still sells at once, so riding only touches the rare up-probes. */
+  guardRideUp: number;
+  guardRideTrail: number;
+  guardRideMaxSlots: number;
+  /** Guardrail buys need at least this 15-slot net SOL flow at buy time
+   * (skip coins already being dumped); -100 = off. */
+  guardMinFlow15: number;
   /** Strong-signal probe: when the window's biggest single buy is at least
    * strongWhaleSol, the probe is strongProbeSol instead of probeSol (the
    * two dev winners both had a whale buy of 1.48+ SOL, so size tracks the
@@ -167,18 +210,25 @@ export const DEFAULT_PARAMS: Params = {
   minNetSol: 0.05,
   minBuys: 3,
   minBuyers: 5,
+  maxBuyers: 8,
   minPriceUp: 0.22,
   maxPriceUp: 1.5,
   nearHigh: 0.88,
-  maxSingleSell: 0.5,
+  maxSingleSell: 0.25,
   minWhaleSol: 1.2,
   accelShare: 0.8,
   minRqSol: 0.5,
   maxRqSol: 20,
+  maxEntryRqSol: 14,
   minAge: 100,
   maxAge: 350,
   creatorSellWindow: 100,
   probeSol: 0.02,
+  guardProbeSol: 0.02,
+  guardRideUp: 0,
+  guardRideTrail: 0.05,
+  guardRideMaxSlots: 120,
+  guardMinFlow15: 2,
   strongProbeSol: 0.1,
   strongWhaleSol: 1.4,
   rungs: [
@@ -195,7 +245,7 @@ export const DEFAULT_PARAMS: Params = {
   takeFrac: 0,
   takeUp2: 0,
   takeFrac2: 0,
-  stopLoss: 0.03,
+  stopLoss: 0.02,
   trail: 0.05,
   trailArm: 0.15,
   fadeWindow: 15,
@@ -273,6 +323,8 @@ export function createStrategy(p: Params = DEFAULT_PARAMS): Bot {
   const held = new Map<Pubkey, Held>();
   /** Probe round trips in flight, by mint: false while buying, true once selling. */
   const probes = new Map<Pubkey, boolean>();
+  /** Guardrail probes riding a spike: peak close value and the slot the ride started. */
+  const rides = new Map<Pubkey, { peak: number; opened: number }>();
   /** The bot's own filled orders and the coins they were on (harness closes excluded). */
   let myFills = 0;
   const myCoins = new Set<Pubkey>();
@@ -303,7 +355,8 @@ export function createStrategy(p: Params = DEFAULT_PARAMS): Bot {
   /** Entry signal on a curve's tape at slot `now`. */
   /** Entry signal: the window's biggest single buy in SOL when the tape passes, else -1. */
   const entrySignal = (t: Tape, now: number, rqSol: number): number => {
-    if (rqSol < p.minRqSol || rqSol > p.maxRqSol) return -1;
+    const maxRq = p.maxEntryRqSol > 0 ? p.maxEntryRqSol : p.maxRqSol;
+    if (rqSol < p.minRqSol || rqSol > maxRq) return -1;
     if (t.created === null) return -1;
     const age = now - t.created;
     if (age < p.minAge || age > p.maxAge) return -1;
@@ -341,6 +394,7 @@ export function createStrategy(p: Params = DEFAULT_PARAMS): Bot {
       last = tr.price;
     }
     if (buys < p.minBuys || buyers.size < p.minBuyers) return -1;
+    if (p.maxBuyers > 0 && buyers.size > p.maxBuyers) return -1;
     if (buySol - sellSol < p.minNetSol) return -1;
     if (biggestSell > p.maxSingleSell) return -1;
     if (biggestBuy < p.minWhaleSol) return -1;
@@ -478,16 +532,45 @@ export function createStrategy(p: Params = DEFAULT_PARAMS): Bot {
         orders.push({ side: 'sell', mint, token_amount: pos.token_amount, max_slippage_bps: 10_000 });
       }
 
-      // Probe round trips: sell the whole probe as soon as its buy has landed.
+      // Probe round trips: sell the whole probe as soon as its buy has landed,
+      // unless it is up enough to ride (guardRideUp): then track the peak and
+      // sell on a trailing give-back or after guardRideMaxSlots slots.
       for (const [mint, selling] of probes) {
         const pos = state.positions.get(mint);
         const curve = state.curves.get(mint);
         if (pos === undefined) {
-          if (!pendingByMint.has(mint)) probes.delete(mint);
+          if (!pendingByMint.has(mint)) {
+            probes.delete(mint);
+            rides.delete(mint);
+          }
           continue;
         }
         if (curve === undefined || curve.complete || pendingByMint.has(mint)) continue;
         if (orders.length >= cap) break;
+        const ride = rides.get(mint);
+        if (ride !== undefined) {
+          const res = reservesOf(mint);
+          if (res === null) continue;
+          const value = closeValueSol(Number(pos.token_amount), res.vq, res.vt, tx);
+          if (value > ride.peak) ride.peak = value;
+          if (value < ride.peak * (1 - p.guardRideTrail) || now - ride.opened > p.guardRideMaxSlots) {
+            orders.push({ side: 'sell', mint, token_amount: pos.token_amount, max_slippage_bps: 10_000 });
+            rides.delete(mint);
+            probes.set(mint, true);
+          }
+          continue;
+        }
+        if (!selling && p.guardRideUp > 0) {
+          const res = reservesOf(mint);
+          if (res !== null) {
+            const value = closeValueSol(Number(pos.token_amount), res.vq, res.vt, tx);
+            const cost = Number(pos.cost_lamports) / LAMPORTS;
+            if (cost > 0 && value >= cost * (1 + p.guardRideUp)) {
+              rides.set(mint, { peak: value, opened: now });
+              continue;
+            }
+          }
+        }
         orders.push({ side: 'sell', mint, token_amount: pos.token_amount, max_slippage_bps: 10_000 });
         if (!selling) probes.set(mint, true);
       }
@@ -578,18 +661,19 @@ export function createStrategy(p: Params = DEFAULT_PARAMS): Bot {
         const needCoins = myCoins.size < Math.ceil(p.targetCoins * pace);
         const needFills = myFills < Math.ceil(p.targetFills * pace);
         if (needCoins || needFills) {
-          const minRq = (p.probeSol * 10_000) / state.hello.caps.max_order_bps_of_real_reserve;
+          const minRq = (p.guardProbeSol * 10_000) / state.hello.caps.max_order_bps_of_real_reserve;
           for (const mint of traded) {
             if (orders.length >= cap || probes.size >= p.maxProbes) break;
             if (held.has(mint) || probes.has(mint) || pendingByMint.has(mint) || state.positions.has(mint)) continue;
             if (needCoins && !needFills && myCoins.has(mint)) continue;
+            if (p.guardMinFlow15 > -99 && flow(tapes.get(mint)!, now, 15) < p.guardMinFlow15) continue;
             const curve = state.curves.get(mint);
             if (curve === undefined || curve.complete) continue;
             if (Number(curve.real_quote_reserves) / LAMPORTS < minRq * 1.5) continue;
-            if (free < p.probeSol + 2 * tx) break;
-            orders.push({ side: 'buy', mint, quote_lamports: BigInt(Math.floor(p.probeSol * LAMPORTS)), max_slippage_bps: p.buySlipBps });
+            if (free < p.guardProbeSol + 2 * tx) break;
+            orders.push({ side: 'buy', mint, quote_lamports: BigInt(Math.floor(p.guardProbeSol * LAMPORTS)), max_slippage_bps: p.buySlipBps });
             probes.set(mint, false);
-            free -= p.probeSol + tx;
+            free -= p.guardProbeSol + tx;
           }
         }
       }
