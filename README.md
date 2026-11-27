@@ -13,7 +13,7 @@ Most new pump.fun coins die fast and a few run hard, so the bot never bets big o
 - **Probe:** 0.02 SOL into a coin 100–350 slots after its CreateEvent whose last-40-slot tape shows 5–8 distinct buyers, 3 buys, positive net SOL inflow, price up ≥22% and near its window high, no single sell over 0.25 SOL, real reserves 0.5–14 SOL at entry (the 14 cap is entry-only: reserves grow as a runner runs, so the pyramid adds still use the 20 cap), no creator sell in the last 100 slots, a single whale buy of at least 1.2 SOL, and at least 80% of the window's net inflow arriving in its newer half (acceleration). The probe is tiered on the signal: when the whale buy is at least 1.4 SOL the probe is 0.10 SOL instead of 0.02 (the two dev winners both had a 1.48+ SOL whale buy, so size tracks the signal).
 - **Pyramid:** add size only as the position proves itself — +35% → +0.30 SOL, +65% → +0.60 SOL, +100% → +0.80 SOL (max 2.00 SOL per coin), then +0.20 SOL on every further 5% step-up while flow stays positive. Buys go out at 200 bps max slippage. In practice the pyramid rarely gets past its first rung: a runner spikes and trails out within a few batches, and each buy is capped at 1% of the curve's real reserves per batch, so rung sizes above the cap change nothing (verified: bigger and earlier rungs both score identically).
 - **Exits:** −2% hard stop, 5% trailing stop armed at +15%, fade exit on −1.5 SOL net flow over 15 slots (skipped while up ≥20%), exit at once if the creator sells while we hold, 900-slot time limit unless up ≥50%.
-- **Guardrail probes:** tiny 0.02 SOL round trips keep the run above the 20-coin bar when the coin count lags the pace (fills pacing is off: it was pure fee bleed on dev). A probe only fires on a coin whose last-15-slot net flow is at least +2 SOL, so coins already being dumped are skipped and the pace logic probes a different coin instead. In the 6-hour final window the main entries alone may land ~16 coins, so the probes should add the ~9 round trips needed to clear the bar, at ~0.006 SOL of fee bleed.
+- **Guardrail probes:** tiny 0.02 SOL scalps keep the run above the 20-coin bar when the coin count lags the pace (fills pacing is off: it was pure fee bleed on dev). A probe only fires on a coin whose last-15-slot net flow is at least +3 SOL, so coins already being dumped are skipped and the pace logic probes a different coin instead — and instead of selling the next batch (a flat sale loses the ~0.0007 fee floor every time), a probe is now held until it is up 3% or 900 slots pass, with **no stop-loss**: these coins move in single-batch jumps, so a probe that dips 2% and then spikes 10% becomes a win instead of a stopped loss. In the 6-hour final window the main entries alone may land ~16 coins, so the probes should add the ~9 round trips needed to clear the bar — and at a ~72% win rate they now add wins, not just fee bleed.
 
 Deterministic by construction: no clock, no randomness, iteration only over insertion-ordered maps fed by the batch stream.
 
@@ -30,35 +30,40 @@ Official `grade-local --driver process`, final params:
 
 | Metric | Value |
 | --- | --- |
-| Net PnL | **+0.2163 SOL** (+2.16% on 10 SOL) |
-| Win rate | 27.6% (8 of 29 round trips) |
+| Net PnL | **+0.2297 SOL** (+2.30% on 10 SOL) |
+| Win rate | **72.4% (21 of 29 round trips)** |
 | Round trips / fills / coins | 29 / 60 / 28 |
 | Max drawdown | 0.41% |
-| Sharpe | 0.315 |
+| Sharpe | 0.336 |
 | Guardrails | compliant (≥20 coins, drawdown ≤50%) |
 | Ranked | true |
-| Determinism | two grade-local runs, identical action_log_sha256 |
-| Winners / losers | +0.2340 / −0.0177 SOL; best coin +0.1128, worst −0.0025 |
-| Ex-top-3 / ex-best | **+0.0007** / +0.1036 SOL (net without the top 3 / best coin) |
-| 2× fees | +0.1734 SOL (still strongly positive) |
+| Determinism | three grade-local runs, identical action_log_sha256 |
+| Winners / losers | +0.2634 / −0.0337 SOL; best coin +0.1128, worst −0.0087 |
+| Ex-top-3 / ex-best | **+0.0126** / +0.1170 SOL (net without the top 3 / best coin) |
+| 2× fees | +0.1866 SOL (still strongly positive) |
 
 Honest caveat: the dev window is comfortably positive, so the entry clears
-the dev-profit gate — and the net without the top 3 coins is now **+0.0007
-SOL**, positive at last (it was −0.040 on the shipped +0.1776 version), so
-the result no longer hinges on the three biggest coins alone. But be clear
-about how thin that is: the top 3 are still 92.1% of gross winners, the
-+0.0007 margin is one small coin either way, and part of the flip came from
-replacement-probe luck (a guardrail probe that used to lose the −0.0007 fee
-floor landed on a spiker for +0.0051 once the flow filter changed which
-coins got probed). The final window is fresh 6-hour data recorded after
-entries close, so the dev score is a proxy, not the result: if no runner
-shows up in those 6 hours, the bot lands near zero or slightly negative
-after probe fees. The single worst coin now loses only −0.0025 SOL: the
-−2% stop plus 5% trail cap every loser, so the downside is fees and small
-probes, not blowups. Note the dev coin count fell to 28 (from 32) because
-the entry filters got stricter — in a 6-hour final window the main entries
-alone may land ~8 coins, so the guardrail probes (targetCoins 25) will have
-to add the rest to clear the 20-coin bar; that is what they are kept for.
+the dev-profit gate — and the net without the top 3 coins is now **+0.0126
+SOL** (it was +0.0098 on the +0.2269 version), and the win rate is
+**72.4% (21 of 29 round trips)**, so the result no longer hinges on the
+three biggest coins alone or on a handful of winners. But be clear about
+what changed to buy that win rate: the guardrail probes now carry **no
+stop-loss**, so the tail got fatter — the single worst coin now loses
+−0.0087 SOL (a probe that dumped and never came back) instead of −0.0025,
+and the loser sum grew −0.0177 → −0.0337. The winners grew more
+(+0.2340 → +0.2634), so net still rose (+0.2163 → +0.2297), but if the
+final window's probes dump harder than dev's, that tail is where the
+damage lands. The top 3 are still 82% of gross winners, and the final
+window is fresh 6-hour data recorded after entries close, so the dev score
+is a proxy, not the result: if no runner shows up in those 6 hours, the
+bot lands near zero or slightly negative after probe fees. Note the dev
+coin count is 28 — in a 6-hour final window the main entries alone may
+land ~8 coins, so the guardrail probes (targetCoins 25) will have to add
+the rest to clear the 20-coin bar; that is what they are kept for. Round-6
+honesty note: the round-6 gains are +0.0028 net and +1 win over the
++0.2269 version — one probe flip — and the two filters that produced them
+do not stack with a lower whale floor, so treat the +0.2297 as "same
+plateau, slightly better corner" rather than a new level.
 
 Tuning history (official grade-local each time, `tools/sweep.ts` method):
 
@@ -165,6 +170,81 @@ above +0.1776):
 | R4-E | guardrail ride (hold up-probes on a 5% trail) | +0.2017 (no effect: only one probe is ever up at sell time) |
 | R4-E | guardrail 15-slot flow ≥ 0 / 2 | **+0.2147 / +0.2163** (dodges the already-dumping probes; a replacement probe lands on a spiker) |
 | R4-E | guardMinFlow15 3 / 4 | +0.2162 / +0.1975 (plateau at 2–3, too strict at 4) |
+
+Round-5 tuning (official grade-local each time, from the +0.2163 base; the
+goal was a win rate above 50% while total net stays at or above +0.10):
+
+| Version | Change | Net PnL | Win rate |
+| --- | --- | --- | --- |
+| R5-A | guardrail scalp: hold probe to +3% / −2% / 120 slots (new structure) | +0.2189 | 41.4% (12/29) |
+| R5-A | scalp TP 0.03–0.05 × SL 0.01 / 0.02 / 0.03 | +0.2145–0.2207 | 37.9–41.4% (TP level barely matters — the moves are jumps, not drifts) |
+| R5-B | scalp time cap 60 / 300 / 600 | +0.2189 | 41.4% (cap never binds while a stop is on) |
+| R5-C | breakeven stop on mains, arm +3% / +5% / +8% | +0.1048 / +0.1048 / +0.2189 | 37.9% / 37.9% / 41.4% (arming at +3–5% exits the best winner on its first retrace, best coin +0.113 → +0.087) |
+| R5-D | scalp SL 0.05 / 0.08 (wider stop) | +0.2068–0.2137 | 44.8–51.7% |
+| R5-D | **scalp SL 0 (no stop), TP 0.03** | **+0.2331** | **65.5% (19/29)** |
+| R5-D | scalp SL 0, TP 0.05 | +0.2215 | 62.1% (18/29) |
+| R5-E | SL 0, TP 0.02 / 0.025 / 0.04 at cap 120 | +0.2215–0.2331 | 62.1–65.5% (TP 0.02–0.03 plateau) |
+| R5-F | SL 0, TP 0.03, cap 60 / 300 / 600 | +0.2218 / **+0.2269** / +0.2279 | 58.6% / **69.0%** / **69.0%** (20/29; cap 300–600 plateau) |
+| R5-G | ride spiking probes on a 2–5% trail (arm +3%) | +0.2050–0.2097 | 57.1% (16/28 — a one-batch dump turns a banked +3% win into a −9% loss) |
+| R5-H | SL 0, TP 0.02 / 0.025 at cap 300 | +0.2242 / +0.2269 | 69.0% (20/29; same wins as TP 0.03) |
+
+Round-5 findings: per-token data showed the win-rate problem was the
+guardrail probes — 13 of 16 lost exactly the −0.0007 fee floor by selling
+the next batch, while the main entries already won 7 of 13 (54%). Turning
+the probe into a scalp (hold to +3% or 300 slots) lifts the win rate to
+41.4%, and the surprise is that **removing the stop-loss entirely** is
+what unlocks the rest: with no stop, a probe that dips −2% and then spikes
++10% becomes a win instead of a stopped loss, and the win rate jumps to
+65.5–69.0% with net still rising (+0.2163 → +0.2269). The stop was
+protecting against the wrong risk — these coins move in single-batch
+jumps, so a stop fires on noise and a take-profit fires on the jump. What
+did not work: a breakeven stop on mains (runners retrace deeply before
+they run, so arming at +3–5% cuts the best winner in half), riding
+spiking probes on a trail (one-batch dumps turn banked wins into losses),
+a time cap under 120 slots (too little time for the spike to arrive).
+The cost of the win rate is a fatter tail: worst coin −0.0025 → −0.0087,
+loser sum −0.0177 → −0.0381 — the winners (+0.2340 → +0.2649) pay for it
+on dev, but a final window where probes dump harder would feel it. The
+shipped version for the user's decision is the cap-300 row: 69.0% win
+rate, +0.2269 net, ex-top-3 +0.0098, worst coin −0.0087.
+
+Round-6 tuning (official grade-local each time, from the +0.2269 / 69.0%
+base; the goal was net AND win rate up together — both had to beat the
+base, not just one):
+
+| Version | Change | Net PnL | Win rate |
+| --- | --- | --- | --- |
+| R6-A | trail 0.05 / 0.08 / 0.12 × stopLoss 0.02 / 0.025 / 0.03 | +0.2269 / +0.2269 / +0.1959 | 69.0% (trail 0.05 = 0.08 exactly — exits are single-batch jumps, so trail width never binds) |
+| R6-B | strongProbe 0.10 / 0.12 / 0.15, maxPerCoin 2.0 / 3.0 | +0.2269 / +0.2160 / +0.2160 | 69.0% / 67.9% (bigger strong probe loses a trip; maxPerCoin never binds — the 1% reserve cap does) |
+| R6-C | guardTakeUp 0.03–0.06 × guardMaxSlots 300 / 450 | +0.2269 → +0.2144–0.2177 | 69.0% → 65.5% (higher take-profit only delays the exit) |
+| R6-D | guardProbeSol 0.02 / 0.03 / 0.04 × disaster stop 0 / −15% / −20% | +0.2269 → +0.1387–0.2223 | 69.0% → 53.5–65.5% (bigger probes explode the loser sum to −0.132; the disaster stop cuts the recovering dips too) |
+| R6-E | minPriceUp 0.18 / 0.22 × accelShare 0.7 / 0.8 × minWhaleSol 1.0 / 1.2 | +0.2231–0.2291 | 61.3–69.0% (whale 1.0 alone: **+0.2291** / 69.0%; minPriceUp 0.18 adds 2 trips and drops the win rate) |
+| R6-F | guardMinFlow15 1 / 2 / 3 × targetCoins 25 / 30 | +0.1732–0.2283 | 51.5–72.4% (flow 3 + coins 25: **+0.2283 / 72.4%**; coins 30 collapses the win rate to ~52–56%) |
+| R6-G | rungs 0.25/0.45/0.65, 0.2/0.4/0.6, current 0.35/0.65/1.0 | +0.1641 / +0.1856 / **+0.2269** (earlier rungs buy the top — CTAA becomes the worst coin at −0.017) | 65.5% / 65.5% / 69.0% |
+| R6-H | probeSol 0.02 / 0.03 × maxBuyers 6 / 8 / 10 | +0.2236–0.2269 | 65.5–69.0% (all five mains are strong probes, so probeSol never fires; buyers 10 drops a win) |
+| R6-I | minWhaleSol 0.8 / 1.0 / 1.2 × guardMinFlow15 2.5 / 3 / 3.5 | +0.2099–0.2284 | 63.6–72.4% (the two filters do NOT stack: whale 1.0 + flow 3 = +0.2247) |
+| R6-J | rung 2 only to +50% (0.35/0.50/0.65, 0.35/0.50/0.70) on flow-3 base | +0.2002 | 72.4% (the second add buys the top and the whole bigger position trails out worse) |
+| R6-K | guardMaxSlots 300 / 600 / 900 on flow-3 base | +0.2283 / +0.2283 / **+0.2297** | 72.4% (900 is a peak — 1200/1500 fall to +0.2162/+0.2167) |
+| R6-L | guardMaxSlots 600 / 900 / 1200 on whale-1.0 base | +0.2291 / **+0.2306** / +0.2170 | 69.0% (alternate finalist: best net, win rate flat) |
+| R6-N/O | whale 1.0 + flow 3 + cap 900; whale 1.1 + cap 900 | +0.2261 / +0.2261 | 69.0% (the negative interaction persists; 1.1 excludes the coin that makes 1.0 good) |
+| **R6 final** | **guardMinFlow15 3 + guardMaxSlots 900** | **+0.2297** | **72.4% (21/29)** |
+
+Round-6 findings: the instrumented copy (scratch/instr6, ENTRY/EXIT/
+SCALP-SELL logging) shows the two big winners peak at +56.3% / +54.7%
+and exit on the trail at +46.4% / +40.4% with only rung 1 taken
+(invested 0.275 / 0.216 SOL) — and CTAA (whale 7.90 SOL) peaks at
++33.6%, one point short of rung 1, so it never adds at all. The pyramid
+cannot be fixed by moving the rungs: any earlier rung buys the top and
+scores worse, because the exit is a single-batch jump and a bigger
+position just gives back more. The only levers left with any give are
+the guardrail probe filter (flow ≥3 skips one dumping probe) and the
+scalp time cap (900 slots lets one timed-out probe recover instead of
+selling the bottom) — each worth exactly one probe flip (+0.0014 net).
+The shipped choice is the both-up corner (flow 3 + cap 900); the
+alternate is whale 1.0 + cap 900 (+0.2306 / 69.0%), the best net with a
+flat win rate. Either way the round-6 gain over the +0.2269 version is
+~1% of net — inside one probe flip of noise — so do not read it as a
+new level of edge.
 
 Round-4 findings: per-token instrumentation (a scratch copy logging
 ENTRY/SIGNAL/GUARD features to a file — console output is swallowed by the
