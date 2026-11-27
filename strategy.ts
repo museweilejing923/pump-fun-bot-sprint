@@ -77,6 +77,59 @@
 // thin (+0.0007) and leans on one replacement probe's luck — the total net
 // gain is the robust part, the diversification is not.
 //
+// Round 5 (dev +0.2163 -> +0.2269, win rate 27.6% -> 69.0%): the win
+// rate was dragged down by the guardrail probes, which used to sell the
+// next batch and lose the ~0.0007 fee floor on 13 of 16 probes (only 1 of
+// 16 won). A probe is now a scalp: hold it until it is up guardTakeUp
+// (+3%), or guardMaxSlots (300) slots pass, with NO stop-loss — the
+// counter-intuitive finding is that a -2% stop was what kept the win
+// rate down, because these coins move in single-batch jumps: a probe that
+// dips -2% and then spikes +10% was a stopped loss, and with no stop it
+// becomes a win (20 of 29 trips win; the take-profit level itself
+// barely matters, +2% to +5% all score the same, because the moves are
+// jumps, not drifts). The price is a fatter tail: the worst coin is now
+// -0.0087 (a probe that dumped and never came back) instead of -0.0025,
+// and the loser sum grows -0.0177 -> -0.0381 — but the winners grow more
+// (+0.2340 -> +0.2649), so net still rises and ex-top-3 improves
+// +0.0007 -> +0.0098. What did not work: a breakeven stop on mains
+// (arming at +3-5% exits the big winner on its first retrace, net
+// +0.219 -> +0.105 and win rate falls too — runners retrace deeply
+// before they run); riding spiking probes on a trail (a one-batch dump
+// turns a banked +3% win into a -9% loss, win rate 69% -> 57%); the
+// time cap below 120 slots (too little time for the spike to arrive).
+// The cap is a plateau (300-600 identical at 20 wins), so 300 is the
+// first point of it, not a cliff edge.
+//
+// Round 6 (dev +0.2269 -> +0.2297, win rate 69.0% -> 72.4%): the goal was
+// both metrics up together, and the headroom is nearly gone — ~60 graded
+// combos found nothing that moves net by more than one probe flip. The
+// per-token log shows why: the two big winners peak at +54-56% and exit
+// on the 5% trail just under the +65% second rung, and the trail width
+// itself does not matter (0.05 = 0.08 exactly — the price moves in
+// single-batch jumps, so the exit price is set by the first big down-jump
+// after the peak, not by the trail). Moving the rungs earlier only buys
+// the top: 0.25/0.45/0.65 scores +0.1641, 0.2/0.4/0.6 +0.1856, and moving
+// just rung 2 to +50% scores +0.2002 — the bigger position trails out
+// worse. What did move both metrics, by one probe flip each: a stricter
+// guardrail flow filter (guardMinFlow15 2 -> 3: the 21st win, net
+// +0.2283) and a longer scalp time cap (guardMaxSlots 300 -> 900: one
+// more timed-out probe recovers instead of selling the bottom, net
+// +0.2297); 1200+ gives it all back (+0.2162), so 900 is a peak, not a
+// plateau. The two filters do NOT stack with a lower whale floor
+// (minWhaleSol 1.0 + flow 3 = +0.2247): they compete for the same probe
+// slot. The alternate finalist is minWhaleSol 1.0 + cap 900 at +0.2306 /
+// 69.0% — the best net, but the win rate is flat, so this file ships
+// the both-up version instead. Everything else re-verified dead on this
+// base: strongProbe 0.12/0.15 (+0.2160), maxPerCoin 3.0 (no change, the
+// 1% reserve cap binds), guardTakeUp above 0.03 (win rate 65.5%),
+// guardProbeSol above 0.02 (loser sum explodes to -0.132), disaster
+// stops on probes (-15% / -20%: win rate 62-65.5%, the dips that
+// recover get cut), trail 0.12 (+0.1959), stopLoss 0.03 (+0.2219),
+// targetCoins 30 (win rate collapses to ~52-56%), minPriceUp 0.18
+// (31 trips, win rate 61-64.5%). Honest note: the round-6 gains are
+// +0.0028 net and +1 win — one probe flip — and may not transfer to
+// the fresh final window; the robust part is that nothing got worse.
+//
 // Deterministic by construction: no clock, no randomness, iteration only over
 // insertion-ordered maps fed by the batch stream. Every batch, orders and
 // slot are handled in the order the harness delivers them.
@@ -149,6 +202,23 @@ export interface Params {
   /** Guardrail buys need at least this 15-slot net SOL flow at buy time
    * (skip coins already being dumped); -100 = off. */
   guardMinFlow15: number;
+  /** Guardrail scalp: instead of selling a probe the next batch (a flat
+   * sale loses the ~0.0007 fee floor every time), hold it until it is up
+   * guardTakeUp, down guardStopLoss, or guardMaxSlots slots have passed.
+   * 0 for a take/stop disables that side; the time cap only applies while
+   * a take or a stop is on. A probe bought into a buying burst needs a
+   * few batches for the move to show up, so holding to a small
+   * take-profit turns the probe from a certain small loss into a coin
+   * flip — and a round trip only counts as a win when the after-fee
+   * close value beats cost, so the take must clear ~+3% of fees. */
+  guardTakeUp: number;
+  guardStopLoss: number;
+  guardMaxSlots: number;
+  /** Breakeven stop for main positions: once a position is up beArm, arm
+   * a stop at cost * (1 + bePad); a later fall back through it exits at
+   * a micro-win instead of riding down to the hard stop. 0 = off. */
+  beArm: number;
+  bePad: number;
   /** Strong-signal probe: when the window's biggest single buy is at least
    * strongWhaleSol, the probe is strongProbeSol instead of probeSol (the
    * two dev winners both had a whale buy of 1.48+ SOL, so size tracks the
@@ -228,7 +298,12 @@ export const DEFAULT_PARAMS: Params = {
   guardRideUp: 0,
   guardRideTrail: 0.05,
   guardRideMaxSlots: 120,
-  guardMinFlow15: 2,
+  guardMinFlow15: 3,
+  guardTakeUp: 0.03,
+  guardStopLoss: 0,
+  guardMaxSlots: 900,
+  beArm: 0,
+  bePad: 0.005,
   strongProbeSol: 0.1,
   strongWhaleSol: 1.4,
   rungs: [
@@ -300,6 +375,8 @@ interface Held {
   rungIdx: number;
   /** How many partial profit-takes have been taken (0, 1 or 2). */
   takeIdx: number;
+  /** Breakeven stop armed: the position was up beArm at some batch. */
+  beArmed: boolean;
   /** Set when a partial take was just issued: re-mark the peak to the
    * remaining position's value on the next batch, so the trailing stop is
    * measured on what is still held. */
@@ -325,6 +402,8 @@ export function createStrategy(p: Params = DEFAULT_PARAMS): Bot {
   const probes = new Map<Pubkey, boolean>();
   /** Guardrail probes riding a spike: peak close value and the slot the ride started. */
   const rides = new Map<Pubkey, { peak: number; opened: number }>();
+  /** Guardrail probes held as scalps: the slot the probe's buy first showed up. */
+  const scalps = new Map<Pubkey, { opened: number }>();
   /** The bot's own filled orders and the coins they were on (harness closes excluded). */
   let myFills = 0;
   const myCoins = new Set<Pubkey>();
@@ -516,6 +595,14 @@ export function createStrategy(p: Params = DEFAULT_PARAMS): Bot {
         let exit = h.exiting;
         if (!exit && value < cost * (1 - p.stopLoss)) exit = true;
         if (!exit && h.peakValue >= cost * (1 + p.trailArm) && value < h.peakValue * (1 - p.trail)) exit = true;
+        // Breakeven stop: once armed by a rise of beArm, a fall back to
+        // cost * (1 + bePad) banks a micro-win instead of riding to the
+        // hard stop. value is the after-fee close value, so clearing
+        // bePad means the trip counts as a win, not a fee loss.
+        if (!exit && p.beArm > 0) {
+          if (upVsCost >= p.beArm) h.beArmed = true;
+          if (h.beArmed && value < cost * (1 + p.bePad)) exit = true;
+        }
         if (!exit && upVsCost < p.fadeSkipUp && flow(tapeOf(mint), now, p.fadeWindow) < -p.fadeNetSol) exit = true;
         if (!exit && creatorSold.has(mint)) exit = true;
         if (!exit && now - h.opened > p.maxHold && upVsCost < p.holdIfUp) exit = true;
@@ -542,6 +629,7 @@ export function createStrategy(p: Params = DEFAULT_PARAMS): Bot {
           if (!pendingByMint.has(mint)) {
             probes.delete(mint);
             rides.delete(mint);
+            scalps.delete(mint);
           }
           continue;
         }
@@ -567,6 +655,35 @@ export function createStrategy(p: Params = DEFAULT_PARAMS): Bot {
             const cost = Number(pos.cost_lamports) / LAMPORTS;
             if (cost > 0 && value >= cost * (1 + p.guardRideUp)) {
               rides.set(mint, { peak: value, opened: now });
+              continue;
+            }
+          }
+        }
+        // Scalp mode: hold the probe until it hits the take-profit, the
+        // stop-loss, or the time cap, instead of selling it flat the next
+        // batch (which loses the fee floor every time). The first batch the
+        // buy shows up just records the open slot and holds.
+        if (!selling && (p.guardTakeUp > 0 || p.guardStopLoss > 0)) {
+          const res = reservesOf(mint);
+          if (res !== null) {
+            const value = closeValueSol(Number(pos.token_amount), res.vq, res.vt, tx);
+            const cost = Number(pos.cost_lamports) / LAMPORTS;
+            if (cost > 0) {
+              const scalp = scalps.get(mint);
+              if (scalp === undefined) {
+                scalps.set(mint, { opened: now });
+                continue;
+              }
+              const up = value / cost - 1;
+              const tpHit = p.guardTakeUp > 0 && up >= p.guardTakeUp;
+              const slHit = p.guardStopLoss > 0 && up <= -p.guardStopLoss;
+              const timedOut = p.guardMaxSlots > 0 && now - scalp.opened > p.guardMaxSlots;
+              if (tpHit || slHit || timedOut) {
+                orders.push({ side: 'sell', mint, token_amount: pos.token_amount, max_slippage_bps: 10_000 });
+                scalps.delete(mint);
+                probes.set(mint, true);
+                continue;
+              }
               continue;
             }
           }
@@ -644,6 +761,7 @@ export function createStrategy(p: Params = DEFAULT_PARAMS): Bot {
             rungIdx: 0,
             takeIdx: 0,
             resetPeak: false,
+            beArmed: false,
           });
           t.entries++;
           slotsLeft--;
